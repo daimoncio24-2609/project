@@ -1,22 +1,22 @@
 const ExcelJS = require('exceljs');
 const PDFDocument = require('pdfkit');
-const db = require('./db');
+const { q } = require('./db');
 const { sprintSummary, visibleUsers } = require('./summary');
 const { POSITIONS, DERIVED_LABELS, HEADLINE, CATEGORIES } = require('./metrics');
 
 const STATUS_LABEL = { healthy: 'Sehat', busy: 'Padat', risk: 'Risiko Burnout', low: 'Kurang Terpakai', unknown: '-' };
 
-function sprintsFor({ sprint, month }) {
-  if (sprint) return db.prepare('SELECT * FROM sprints WHERE id=?').all(sprint);
-  if (month) return db.prepare("SELECT * FROM sprints WHERE substr(start_date,1,7)=? OR substr(end_date,1,7)=? ORDER BY start_date").all(month, month);
+async function sprintsFor({ sprint, month }) {
+  if (sprint) return q('SELECT * FROM sprints WHERE id=$1', [sprint]);
+  if (month) return q("SELECT * FROM sprints WHERE to_char(start_date,'YYYY-MM')=$1 OR to_char(end_date,'YYYY-MM')=$1 ORDER BY start_date", [month]);
   return [];
 }
 
-function buildRows(viewer, params) {
+async function buildRows(viewer, params) {
   const rows = [];
-  const sprints = sprintsFor(params);
+  const sprints = await sprintsFor(params);
   for (const s of sprints) {
-    const sum = sprintSummary(viewer, s.id, params.team ? Number(params.team) : null);
+    const sum = await sprintSummary(viewer, s.id, params.team ? Number(params.team) : null);
     for (const r of sum.rows) {
       const metrics = HEADLINE[r.user.position].map(k => `${DERIVED_LABELS[k][0]}: ${r.metrics[k] ?? '-'}${r.metrics[k] != null ? ' ' + DERIVED_LABELS[k][1] : ''}`.trim());
       rows.push({
@@ -63,9 +63,9 @@ async function toXlsx({ sprints, rows }, viewer) {
     { header: 'Judul', key: 'title', width: 44 }, { header: 'Kategori', key: 'category', width: 24 }, { header: 'Ukuran', key: 'size', width: 8 },
     { header: 'Poin', key: 'points', width: 8 }, { header: 'Jam', key: 'hours', width: 8 }, { header: 'Status', key: 'status', width: 14 }, { header: 'Sumber', key: 'source', width: 10 },
   ];
-  const ids = new Set(visibleUsers(viewer).map(u => u.id));
+  const ids = new Set((await visibleUsers(viewer)).map(u => u.id));
   for (const s of sprints) {
-    const items = db.prepare('SELECT w.*, u.name FROM workloads w JOIN users u ON u.id=w.user_id WHERE sprint_id=? ORDER BY u.name').all(s.id);
+    const items = await q('SELECT w.*, u.name FROM workloads w JOIN users u ON u.id=w.user_id WHERE sprint_id=$1 ORDER BY u.name', [s.id]);
     for (const i of items) if (ids.has(i.user_id)) wt.addRow({ ...i, sprint: s.name, category: CATEGORIES[i.category] || i.category });
   }
   wt.getRow(1).font = { bold: true };

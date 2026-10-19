@@ -1,14 +1,20 @@
 const test = require('node:test');
 const assert = require('node:assert');
-const os = require('os'), path = require('path'), fs = require('fs'), crypto = require('crypto');
-process.env.DB_FILE = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'pwt-')), 'test.db');
-process.env.DATA_DIR = path.dirname(process.env.DB_FILE);
-require('../src/seed.js');
+const crypto = require('crypto');
+// Butuh PostgreSQL. Default: database `pwt_test` lokal; ganti lewat TEST_DATABASE_URL.
+process.env.DATABASE_URL = process.env.TEST_DATABASE_URL || 'postgres://pwt:pwt@127.0.0.1:5432/pwt_test';
+const { pool } = require('../src/db');
+const seed = require('../src/seed');
 const app = require('../src/server');
 
 let server, base;
-test.before(() => new Promise(r => { server = app.listen(0, () => { base = `http://127.0.0.1:${server.address().port}`; r(); }); }));
-test.after(() => server.close());
+test.before(async () => {
+  await app.ready;
+  await pool.query('TRUNCATE teams, users, sprints, workloads, metrics RESTART IDENTITY CASCADE');
+  await seed();
+  await new Promise(r => { server = app.listen(0, () => { base = `http://127.0.0.1:${server.address().port}`; r(); }); });
+});
+test.after(async () => { server.close(); await pool.end(); });
 
 async function call(method, url, body, cookie, headers = {}) {
   const r = await fetch(base + url, { method, headers: { 'Content-Type': 'application/json', ...(cookie ? { Cookie: cookie } : {}), ...headers }, body: body ? JSON.stringify(body) : undefined });

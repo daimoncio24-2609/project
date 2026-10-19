@@ -1,15 +1,15 @@
-const db = require('./db');
+const { q } = require('./db');
 const { compute, round } = require('./metrics');
 
-function metricsMap(userId, sprintId) {
+async function metricsMap(userId, sprintId) {
   const m = {};
-  for (const r of db.prepare('SELECT key, value FROM metrics WHERE user_id=? AND sprint_id=?').all(userId, sprintId)) m[r.key] = r.value;
+  for (const r of await q('SELECT key, value FROM metrics WHERE user_id=$1 AND sprint_id=$2', [userId, sprintId])) m[r.key] = r.value;
   return m;
 }
 
-function memberSummary(user, sprintId) {
-  const items = db.prepare('SELECT * FROM workloads WHERE user_id=? AND sprint_id=?').all(user.id, sprintId);
-  const { workload, metrics } = compute(user, items, metricsMap(user.id, sprintId));
+async function memberSummary(user, sprintId) {
+  const items = await q('SELECT * FROM workloads WHERE user_id=$1 AND sprint_id=$2', [user.id, sprintId]);
+  const { workload, metrics } = compute(user, items, await metricsMap(user.id, sprintId));
   return {
     user: { id: user.id, name: user.name, position: user.position, team_id: user.team_id, capacity: user.capacity },
     workload, metrics,
@@ -17,16 +17,17 @@ function memberSummary(user, sprintId) {
 }
 
 function visibleUsers(viewer, teamId) {
-  let sql = "SELECT * FROM users WHERE active=1 AND role!='admin'";
+  let sql = "SELECT * FROM users WHERE active AND role<>'admin'";
   const args = [];
-  if (viewer.role === 'staff') { sql += ' AND id=?'; args.push(viewer.id); }
-  else if (viewer.role === 'lead') { sql += ' AND team_id=?'; args.push(viewer.team_id); }
-  else if (teamId) { sql += ' AND team_id=?'; args.push(teamId); }
-  return db.prepare(sql + ' ORDER BY position, name').all(...args);
+  if (viewer.role === 'staff') { args.push(viewer.id); sql += ` AND id=$${args.length}`; }
+  else if (viewer.role === 'lead') { args.push(viewer.team_id); sql += ` AND team_id=$${args.length}`; }
+  else if (teamId) { args.push(teamId); sql += ` AND team_id=$${args.length}`; }
+  return q(sql + ' ORDER BY position, name', args);
 }
 
-function sprintSummary(viewer, sprintId, teamId) {
-  const rows = visibleUsers(viewer, teamId).filter(u => u.position).map(u => memberSummary(u, sprintId));
+async function sprintSummary(viewer, sprintId, teamId) {
+  const users = (await visibleUsers(viewer, teamId)).filter(u => u.position);
+  const rows = await Promise.all(users.map(u => memberSummary(u, sprintId)));
   const withLoad = rows.filter(r => r.workload.loadPct != null);
   const avgLoad = withLoad.length ? round(withLoad.reduce((s, r) => s + r.workload.loadPct, 0) / withLoad.length, 0) : null;
   const qa = rows.filter(r => r.user.position === 'QA');
@@ -53,12 +54,12 @@ function sprintSummary(viewer, sprintId, teamId) {
   };
 }
 
-function trend(viewer, teamId, limit = 6) {
-  const sprints = db.prepare('SELECT * FROM sprints ORDER BY start_date DESC LIMIT ?').all(limit).reverse();
-  return sprints.map(s => {
-    const t = sprintSummary(viewer, s.id, teamId).totals;
+async function trend(viewer, teamId, limit = 6) {
+  const sprints = (await q('SELECT * FROM sprints ORDER BY start_date DESC LIMIT $1', [limit])).reverse();
+  return Promise.all(sprints.map(async s => {
+    const t = (await sprintSummary(viewer, s.id, teamId)).totals;
     return { sprint: s.name, id: s.id, avgLoad: t.avgLoad, velocity: t.devVelocity, escapedBugs: t.escapedBugs };
-  });
+  }));
 }
 
 module.exports = { memberSummary, sprintSummary, visibleUsers, trend, metricsMap };
